@@ -1,0 +1,191 @@
+---
+title: "TCGA-KIRC Differential expression: Tumor vs Normal"
+author: "Jeremy M. Simon"
+date: "2/17/2023"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r, echo=F}
+rm(list = ls())
+```
+
+# Load libraries
+```{r, message=FALSE, warning=FALSE}
+library(SummarizedExperiment)
+library(GenomicRanges)
+library(tidyverse)
+library(TCGAbiolinks)		# TCGAbiolinks_2.25.3
+library(DESeq2)
+```
+
+```{r,echo=F}
+setwd("/proj/jmsimon/Zhang/ccRCC_TCGA_GDC_dCas9screen")
+knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
+                      message = FALSE, cache.lazy = FALSE)
+
+```
+
+# Load gene expression data from previous session
+```{r}
+load("TCGA_KIRC_GDC_021723.RData")
+```
+
+# Summarize expression (raw counts) by gene symbol for tumors where there is more than one sample
+```{r,cache=T}
+data.tbl <- rownames_to_column(as.data.frame(assays(rna.data)$unstranded),var="ID") %>%
+	as_tibble() %>%
+	inner_join(rownames_to_column(as.data.frame(rowData(rna.data)),var="ID"),by="ID") %>%
+	dplyr::select(gene_name,contains("TCGA")) %>%
+	pivot_longer(cols=contains("TCGA"),names_to="barcode",values_to="Expression") %>%
+	inner_join(as.data.frame(colData(rna.data)) %>% as_tibble(),by="barcode") %>%
+	group_by(gene_name,sample,sample_type) %>%
+	summarize(AvgExpression = mean(Expression)) %>%
+	ungroup()
+
+data.tbl
+
+# Convert back into a wide format
+data.df <- data.tbl %>%
+	mutate(sample_info = paste0(sample,"_",str_replace_all(sample_type," ","")),.keep="unused") %>%
+	pivot_wider(names_from=sample_info,values_from=AvgExpression) %>%
+	column_to_rownames(var="gene_name") %>%
+	as.data.frame()
+
+data.df[1:5,1:3]
+```
+
+# Remove additional new primary sample
+```{r}
+cnames <- colnames(data.df)
+sampleType <- str_replace_all(cnames,".+_","")
+colnames <- str_replace_all(cnames,"_.+","")
+
+data.df.subset <- data.df[,-which(sampleType=="Additional-NewPrimary")]
+colnames.subset <- colnames[-which(sampleType=="Additional-NewPrimary")]
+sampleType.subset <- sampleType[-which(sampleType=="Additional-NewPrimary")]
+cnames.subset <- cnames[-which(sampleType=="Additional-NewPrimary")]
+```
+
+# Set up coldata for DESeq2
+Add in demographic data to include these as batch correction terms in the model
+
+There's one patient whose age at diagnosis is not known, so remove this one
+
+Note we will also scale Age (age_at_diagnosis, in days) since its mean or standard deviation will certainly be larger than 5 and trigger a warning, described more [here](https://support.bioconductor.org/p/129082/)
+
+```{r}
+# Peek at the clinical metadata supplied alongside gene expression information
+colData(rna.data)[1:5,1:5]
+
+# Pull sample, sample_type, gender, age, race, ethnicity information
+full.meta <- as.data.frame(cbind("Sample" = paste0(colData(rna.data)$sample,"_",str_replace_all(colData(rna.data)$sample_type," ","")), "SampleType" = str_replace_all(colData(rna.data)$sample_type," ",""), "Gender" = colData(rna.data)$gender, "Age" = as.numeric(colData(rna.data)$age_at_diagnosis), "Race" = colData(rna.data)$race, "Ethnicity" = colData(rna.data)$ethnicity))
+
+# Find and remove the sample where age_at_diagnosis was NA, subset both the metadata and gene expression matrices
+full.meta <- full.meta[-which(full.meta$Sample == paste0(colData(rna.data)[is.na(colData(rna.data)$age_at_diagnosis),]$sample,"_",str_replace_all(colData(rna.data)[is.na(colData(rna.data)$age_at_diagnosis),]$sample_type," ",""))),]
+
+data.df.subset <- data.df.subset[,-which(colnames(data.df.subset) == paste0(colData(rna.data)[is.na(colData(rna.data)$age_at_diagnosis),]$sample,"_",str_replace_all(colData(rna.data)[is.na(colData(rna.data)$age_at_diagnosis),]$sample_type," ","")))]
+
+full.meta$SampleType <- as.factor(full.meta$SampleType)
+full.meta$Gender <- as.factor(full.meta$Gender)
+full.meta$Race <- as.factor(str_replace_all(full.meta$Race," ", "_"))
+full.meta$Ethnicity <- as.factor(str_replace_all(full.meta$Ethnicity," ", "_"))
+full.meta$Age <- scale(as.numeric(full.meta$Age))
+full.meta <- unique(full.meta)
+rownames(full.meta) <- full.meta$Sample
+
+full.meta.filt <- full.meta[colnames(data.df.subset),]
+head(full.meta.filt)
+```
+
+# Run differential expression test comparing tumor to normal, correcting for demographic terms
+```{r,cache=T}
+dds <- DESeqDataSetFromMatrix(countData = round(data.df.subset), 
+	colData = full.meta.filt, 
+	design = ~ Gender + Age + Race + Ethnicity + SampleType)
+
+dds <- DESeq(dds)
+
+# There are 12 genes that don't converge in this model and likely have low/spurious counts, omit them here
+rownames(dds[which(!mcols(dds)$betaConv),])
+
+dds <- dds[which(mcols(dds)$betaConv),]
+
+# Produce results, first get p-values with lfcThreshold set
+res <- results(dds,
+	contrast=c("SampleType","PrimaryTumor","SolidTissueNormal"),
+	lfcThreshold = 0.5)
+
+# Now apply shrinkage procedure for LFCs with ashr	
+res <- lfcShrink(dds,
+	res=res, 
+	type="ashr")
+
+# VST normalization for downstream plotting
+vsd <- vst(dds)
+
+# corrected by demographics
+des <- model.matrix(~dds$Gender + dds$Age + dds$Race + dds$Ethnicity + dds$SampleType)
+head(des)
+
+des.cond <- as.matrix(des[,9])
+des.batches <- des[,-9]
+assay(vsd) <- limma::removeBatchEffect(assay(vsd), design = des.cond, covariates = des.batches)
+```
+
+# Plot corrected PCA
+```{r,echo=F}
+pdf("TCGA_KIRC_GDC_TumorNormal_DESeq2_PCA_demoCorrected.pdf")
+DESeq2::plotPCA(vsd, intgroup="SampleType")
+DESeq2::plotPCA(vsd, intgroup="Gender")
+DESeq2::plotPCA(vsd, intgroup="Age")
+DESeq2::plotPCA(vsd, intgroup="Race")
+DESeq2::plotPCA(vsd, intgroup="Ethnicity")
+dev.off()
+```
+
+```{r}
+DESeq2::plotPCA(vsd, intgroup="SampleType")
+DESeq2::plotPCA(vsd, intgroup="Gender")
+DESeq2::plotPCA(vsd, intgroup="Age")
+DESeq2::plotPCA(vsd, intgroup="Race")
+DESeq2::plotPCA(vsd, intgroup="Ethnicity")
+```
+
+
+# Write output table with VST-normalized expression
+```{r}
+res <- res[order(res$padj), ]
+resdata <- merge(as.data.frame(res,row.names=rownames(res)), 
+	as.data.frame(assay(vsd)), 
+	by="row.names", 
+	sort=FALSE)
+rownames(resdata)=resdata$Row.names
+resdata=resdata[,-1]
+resdata[1:5,1:10]
+```
+
+```{r,echo=F}
+write.table(resdata, "TCGA_KIRC_GDC_TumorNormal_DESeq2_demoCorrected_results.txt" ,quote=F,sep="\t",col.names=NA)
+```
+
+# Filter for padj < 0.05 and LFC > 0.5
+```{r}
+resdata.sig <- resdata[!is.na(resdata$padj) & resdata$padj < 0.05 & resdata$log2FoldChange > 0.5,]
+resdata.sig[1:5,1:10]
+```
+
+```{r,echo=F}
+write.table(resdata.sig, "TCGA_KIRC_GDC_TumorNormal_DESeq2_demoCorrected_results_padj05_lfc5.txt" ,quote=F,sep="\t",col.names=NA)
+```
+
+# Save workspace
+```{r}
+save.image("TCGA_KIRC_GDC_021623_TumorNormal_DESeq2_demoCorrected_results.RData")
+```
+
+# Get session info
+```{r}
+sessionInfo()
+```
