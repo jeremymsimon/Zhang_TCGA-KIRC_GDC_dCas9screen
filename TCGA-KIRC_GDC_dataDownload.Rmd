@@ -1,0 +1,65 @@
+---
+title: "Download TCGA-KIRC data from GDC"
+author: "Jeremy M. Simon"
+date: "2/17/2023"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Load libraries, set working directory
+```{r, message=FALSE, warning=FALSE}
+library(SummarizedExperiment)
+library(GenomicRanges)
+library(tidyverse)
+library(TCGAbiolinks)		# TCGAbiolinks_2.25.3
+# Note standard bioC version is outdated as per https://github.com/BioinformaticsFMRP/TCGAbiolinks/issues/544
+```
+
+```{r,echo=F}
+setwd("/proj/jmsimon/Zhang/ccRCC_TCGA_GDC_dCas9screen")
+```
+
+# Retrieve TCGA-KIRC gene expression data from GDC via TCGAbiolinks
+```{r,cache=T,message=F,warning=F,results='hide'}
+rna.query <- GDCquery(
+    project = "TCGA-KIRC", 
+    data.category = "Transcriptome Profiling", 
+    data.type = "Gene Expression Quantification", 
+    workflow.type = "STAR - Counts",
+)
+GDCdownload(rna.query)
+rna.data <- GDCprepare(rna.query)
+```
+
+# Retrieve TCGA-KIRC gene mutation data from GDC via TCGAbiolinks
+```{r,cache=T,message=F,warning=F,results='hide'}
+mut.query <- GDCquery(
+    project = "TCGA-KIRC", 
+    data.category = "Simple Nucleotide Variation", 
+    data.type = "Masked Somatic Mutation"
+)
+GDCdownload(mut.query)
+mut.data <- GDCprepare(mut.query)
+```
+
+# Retrieve TCGA-KIRC CNV data (gene-level) from GDC via TCGAbiolinks
+```{r,cache=T,message=F,warning=F,results='hide'}
+cnv.query <- GDCquery(
+    project = "TCGA-KIRC", 
+    data.category = "Copy Number Variation", 
+    data.type = "Gene Level Copy Number"
+)
+GDCdownload(cnv.query)
+CN.data <- GDCprepare(cnv.query)
+```
+
+# Save workspace
+```{r}
+save.image("TCGA_KIRC_GDC_021723.RData")
+```
+
+# Get session info
+```{r}
+sessionInfo()
+```
