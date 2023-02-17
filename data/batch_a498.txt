@@ -1,0 +1,7 @@
+	condition	cell
+ctrl_1	Initial	A498
+ctrl_2	Initial	A498
+ctrl_3	Initial	A498
+krab_1	OneMonthCulture	A498
+krab_2	OneMonthCulture	A498
+krab_3	OneMonthCulture	A498

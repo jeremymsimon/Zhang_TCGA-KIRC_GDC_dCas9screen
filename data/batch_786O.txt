@@ -1,0 +1,7 @@
+	condition	cell
+ctrl_1	Initial	786O
+ctrl_2	Initial	786O
+ctrl_3	Initial	786O
+krab_1	OneMonthCulture	786O
+krab_2	OneMonthCulture	786O
+krab_3	OneMonthCulture	786O
