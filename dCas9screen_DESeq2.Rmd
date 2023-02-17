@@ -1,0 +1,290 @@
+---
+title: "A498 and 786-O Differential gRNA abundance analysis"
+author: "Jeremy M. Simon, Xiaosai Yao"
+date: "2/17/2023"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Load libraries, set working directory
+```{r, message=FALSE, warning=FALSE}
+library(DESeq2)
+library(ComplexHeatmap)
+library(paletteer)
+library(eulerr)
+```
+
+```{r,echo=F}
+setwd("/proj/jmsimon/Zhang/ccRCC_TCGA_GDC_dCas9screen")
+```
+
+Differential analysis of dCas9_KRAB + gRNA targeting top 500 gained enhancer regions in A498 and 786O
+
+Top enhancers based on Yao, Cancer Discovery 2017
+
+Experiment performed by Tyler Klann of Charles Gersbach lab of Duke University
+
+
+
+# Define differential analysis pvalue and log fold change cutoff
+Note that pvalue is used in place of p-adjusted to allow more exclusive secondary screening later on
+```{r}
+pcutoff <- 0.05
+logFCcutoff <- -1.5
+```
+
+# Perform differential analysis for A498
+```{r}
+# Load previously saved results
+batch_a498 <- read.table('data/batch_a498.txt', header=TRUE, sep='\t',row.names=1,stringsAsFactors=FALSE)
+
+A498_matrix <- read.table('data/A498-krab-gained-enh.txt',
+                          header=TRUE, 
+                          sep='\t',
+                          row.names=1,
+                          stringsAsFactors=FALSE)
+
+
+A498_dds <- DESeqDataSetFromMatrix(countData = A498_matrix,
+                                   colData = batch_a498,
+                                   design = ~ condition)
+
+
+# Run differential abundance test
+A498_dds <- DESeq(A498_dds, fitType="local")
+A498_dds <- estimateSizeFactors(A498_dds)
+A498_par <- estimateDispersions(A498_dds, fitType = "parametric")
+A498_loc <- estimateDispersions(A498_dds, fitType = "local")
+plotDispEsts(A498_par, main= "dispEst: parametric")
+
+plotDispEsts(A498_loc, main= "dispEst: local")
+
+A498_par_residual <- median(abs(mcols(A498_par)$dispGeneEst - mcols(A498_par)$dispFit))
+A498_loc_residual <- median(abs(mcols(A498_loc)$dispGeneEst - mcols(A498_loc)$dispFit))
+
+# Report results
+A498_res <- results(A498_dds, contrast=c("condition","OneMonthCulture","Initial"))
+
+length(which(A498_res$pvalue <0.05 & A498_res$log2FoldChange <0))
+
+length(which(A498_res$pvalue <0.05 & A498_res$log2FoldChange >0))
+
+length(which(A498_res$padj <0.1))
+```
+
+# Plot MA plot
+In order to shade significant regions by pvalue, replace padj by pvalue just for plotting
+```{r}
+A498_res.MA <- A498_res
+A498_res.MA$padj <- A498_res.MA$pvalue
+plotMA(A498_res.MA, 
+       alpha = 0.05 ,
+       ylim=c(-5,5), 
+       main = "A498", 
+       colSig = "red")
+
+```
+
+# Plot PCA
+```{r}
+A498_vsd <- vst(A498_dds, blind=FALSE)
+print(DESeq2::plotPCA(A498_vsd, intgroup=c("condition")))
+```
+
+# Plot cook's distance to check for outliers
+```{r}
+par(mar=c(8,5,2,2))
+boxplot(log10(assays(A498_dds)[["cooks"]]), range=0, las=2)
+```
+
+# Plot dispersion
+```{r}
+plotDispEsts(A498_dds)
+```
+
+# Plot heatmap 
+We will capture the output here for incorporation into summary figure later
+
+```{r}
+A498_rld <- rlog(A498_dds,fitType='local')
+A498_rld.sig <- assay(A498_rld)[which(A498_res$pvalue < pcutoff & A498_res$log2FoldChange < logFCcutoff), ]
+A498_rld.sig <- data.frame(A498_rld.sig)
+A498_res$enhancerID <- rownames(A498_res)
+
+# Median-center rows
+medianCtr<-function(x){
+    annAll <- dimnames(x)
+    medians <- apply(x,1,median,na.rm=T)
+    x <- t(scale(t(x),center=medians,scale=F))
+    dimnames(x) <- annAll
+    return(x)
+}
+
+A498_rld.sig.ctr <- medianCtr(A498_rld.sig)
+
+ha1 <- HeatmapAnnotation(Condition = colData(A498_dds)$condition, 
+	border=T, 
+	col = list(Condition = c("Initial" = paletteer_d(`"colorblindr::OkabeIto"`)[2], "OneMonthCulture" = paletteer_d(`"colorblindr::OkabeIto"`)[1]))
+)
+
+plot1 <- ComplexHeatmap::Heatmap(na.omit(A498_rld.sig.ctr),
+	cluster_columns=F,
+	name = "Median-centered\nnormalized abundance",
+	cluster_rows=F,
+	show_row_names=F,
+	border=T,
+	column_title = "A498",
+	row_title = paste0("n = ",nrow(na.omit(A498_rld.sig.ctr))),
+	top_annotation = ha1,
+	column_labels = c(1:3,1:3),
+	col = circlize::colorRamp2(c(-2, 0, 2), c("blue","white","red"))
+	)
+
+draw(plot1, heatmap_legend_side="bottom", annotation_legend_side = "bottom")
+
+
+saveRDS(plot1,'A498.heatmap.plot.rds')
+write.table(A498_res,paste('Deseq2_A498_krab_R2.local.txt',sep=''),row.names=T, col.names=T,sep="\t")
+```
+
+
+
+
+
+
+
+# Perform differential analysis for 786-O
+```{r}
+# Load previously saved results
+O786_matrix <- read.table('data/786O-krab-gained-enh.txt',
+							header=T, 
+							sep='\t',
+							row.names=1,
+							stringsAsFactors=F)
+
+batch_786O <- read.table('data/batch_786O.txt', header=TRUE, sep='\t',row.names=1,stringsAsFactors=FALSE)
+
+# Run differential abundance test
+O786_dds <- DESeqDataSetFromMatrix(countData = O786_matrix,
+                              colData = batch_786O,
+                              design = ~ condition)
+
+O786_dds <- estimateSizeFactors(O786_dds)
+O786_par <- estimateDispersions(O786_dds, fitType = "parametric")
+O786_loc <- estimateDispersions(O786_dds, fitType = "local")
+plotDispEsts(O786_par, main= "dispEst: parametric")
+
+plotDispEsts(O786_loc, main= "dispEst: local")
+
+O786_par_residual <- median(abs(mcols(O786_par)$dispGeneEst - mcols(O786_par)$dispFit),na.rm = TRUE)
+O786_loc_residual <- median(abs(mcols(O786_loc)$dispGeneEst - mcols(O786_loc)$dispFit),na.rm = TRUE)
+
+# Choose local because residual was smaller
+
+O786_dds <- DESeq(O786_dds, fitType="local")
+
+# Report results
+O786_res <- results(O786_dds, contrast=c("condition","OneMonthCulture","Initial"),cooksCutoff=FALSE)
+
+
+length(which(O786_res$pvalue <0.05 & O786_res$log2FoldChange <0))
+length(which(O786_res$pvalue <0.05 & O786_res$log2FoldChange >0))
+
+length(which(O786_res$padj <0.1))
+```
+
+# Plot MA plot 
+In order to shade by pvalue, replace padj by pvalue just for plotting
+```{r}
+O786_res.MA <- O786_res
+O786_res.MA$padj <- O786_res.MA$pvalue
+
+plotMA(O786_res.MA, 
+       alpha=0.05, 
+       main="786O", 
+       ylim=c(-5,5), 
+       colSig = "red")
+
+```
+
+# Plot PCA
+```{r}
+O786_vsd <- vst(O786_dds, blind=FALSE)
+print(DESeq2::plotPCA(O786_vsd, intgroup=c("condition")))
+```
+
+# Plot cook's distance to check for outliers
+```{r}
+par(mar=c(8,5,2,2))
+boxplot(log10(assays(O786_dds)[["cooks"]]), range=0, las=2)
+```
+
+# Plot dispersion
+```{r}
+plotDispEsts(O786_dds)
+```
+
+
+# Plot heatmap 
+We will capture the output here for incorporation into summary figure later
+
+```{r}
+O786_rld <- rlog(O786_dds, fitType='local')
+O786_rld.sig <- assay(O786_rld)[which(O786_res$pvalue < pcutoff & O786_res$log2FoldChange < logFCcutoff), ]
+O786_rld.sig <- data.frame(O786_rld.sig)
+O786_res$enhancerID <- rownames(O786_res)
+
+# Median-center rows
+O786_rld.sig.ctr <- medianCtr(O786_rld.sig)
+
+ha1 <- HeatmapAnnotation(Condition = colData(O786_dds)$condition,
+        border=T,
+        col = list(Condition = c("Initial" = paletteer_d(`"colorblindr::OkabeIto"`)[2], "OneMonthCulture" = paletteer_d(`"colorblindr::OkabeIto"`)[1]))
+)
+
+plot2 <- ComplexHeatmap::Heatmap(na.omit(O786_rld.sig.ctr),
+	cluster_columns=F,
+        name = "Median-centered\nnormalized abundance",
+	column_title = "786-O",
+	row_title = paste0("n = ",nrow(na.omit(O786_rld.sig.ctr))),
+        cluster_rows=F,
+        show_row_names=F,
+        border=T,
+        top_annotation = ha1,
+        column_labels = c(1:3,1:3),
+	col = circlize::colorRamp2(c(-2, 0, 2), c("blue","white","red"))
+)
+
+draw(plot2, heatmap_legend_side="bottom", annotation_legend_side = "bottom")
+
+
+saveRDS(plot2,'786O.heatmap.plot.rds')
+write.table(O786_res,paste('Deseq2_786O_krab_local.txt',sep=''),row.names=TRUE, col.names=TRUE, sep="\t")
+```
+
+
+# Combine results
+```{r}
+colnames(O786_res) <- paste0("786O_",colnames(O786_res))
+colnames(O786_matrix) <- paste0("786O_",colnames(O786_matrix))
+colnames(A498_res) <- paste0("A498_",colnames(A498_res))
+colnames(A498_matrix) <- paste0("A498_",colnames(A498_matrix))
+both_res <- cbind(O786_res, O786_matrix[rownames(O786_res),], A498_res,  A498_matrix[rownames( A498_res),])
+both_res <- data.frame(both_res)
+head(both_res)
+
+write.table(both_res,paste('Deseq2_786O_A498_krab_local.txt',sep=''),row.names=TRUE, col.names=TRUE,sep="\t")
+```
+
+
+
+# Save workspace
+```{r}
+save.image("dCas9screen_results.RData")
+```
+
+# Get session info
+```{r}
+sessionInfo()
+```
