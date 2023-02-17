@@ -11,6 +11,10 @@ Contents of this repository
 * `dCas9screen_DESeq2.html` and `dCas9screen_DESeq2.Rmd`
   + RMarkdown of differential abundance analysis of dCas9 screen results using [`DESeq2`](http://bioconductor.org/packages/release/bioc/html/DESeq2.html)
   + Rendered document [here](https://jeremymsimon.github.io/Zhang_TCGA-KIRC_GDC_dCas9screen/dCas9screen_DESeq2.html)
+
+* `dCas9screen_assignToGenes.html` and `dCas9screen_assignToGenes.Rmd`
+  + RMarkdown of linking significant gRNAs identified in the dCas9 screen to nearby genes and finding those in common between the cell lines
+  + Rendered document [here](https://jeremymsimon.github.io/Zhang_TCGA-KIRC_GDC_dCas9screen/dCas9screen_assignToGenes.html)
   
 * `TCGA-KIRC_GDC_survival.html` and `TCGA-KIRC_GDC_survival.Rmd`
   + RMarkdown of Kaplan-Meier and Cox proportional hazard testing for putative target genes using [`survminer`](https://rpkgs.datanovia.com/survminer/)
@@ -21,4 +25,4 @@ Contents of this repository
   + RMarkdown of final plot assembly, containing dCas9 screen results, expression of putative target genes in TCGA-KIRC samples, association with patient Overall Survival, VHL mutation status, and VHL gene-level copy number
   + Rendered document [here](https://jeremymsimon.github.io/Zhang_TCGA-KIRC_GDC_dCas9screen/TCGA-KIRC_GDC_plotAssembly.html)
 
-* All associated input and output data files
+* All associated input data files (`data/`) 
