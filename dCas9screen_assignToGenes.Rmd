@@ -1,0 +1,162 @@
+---
+title: "A498 and 786-O Differential gRNA gene assignments"
+author: "Jeremy M. Simon, Xiaosai Yao"
+date: "2/20/2023"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Load libraries, set working directory
+```{r, message=FALSE, warning=FALSE}
+library(rGREAT)
+library(tidyverse)
+library(Vennerable)
+```
+
+```{r,echo=F}
+setwd("/proj/jmsimon/Zhang/ccRCC_TCGA_GDC_dCas9screen")
+```
+
+# Load previously saved workspace
+```{r}
+load("dCas9screen_results.RData")
+```
+
+
+# Associate 786-O to genes using rGREAT linkages to two closest hg19 genes
+In future could improve if updated version allows inclusion of 'name' field in input, see [here](https://github.com/jokergoo/rGREAT/issues/38). 
+For now merging based on coordinates
+```{r}
+
+O786_sig_regions_tbl <- enframe(rownames(O786_rld.sig),name=NULL) %>% 
+    as_tibble() %>%
+    tidyr::extract(value,c("chr","start","end","name"),"(^.+)_(.+)_(.+)_(enh.+)",remove=F) %>%
+	dplyr::select(chr,start,end,value) %>%
+	dplyr::rename("name" = value) %>%
+	mutate(start = as.numeric(start), end = as.numeric(end))
+
+O786_GREATjob <- submitGreatJob(as.data.frame(O786_sig_regions_tbl),
+	species="hg19",
+	rule="twoClosest",
+	gr_is_zero_based=T)
+
+# Peek at gene associations
+getRegionGeneAssociations(O786_GREATjob)
+
+O786_sig_merged <- as.data.frame(getRegionGeneAssociations(O786_GREATjob)) %>% 
+	as_tibble() %>% 
+	unnest_wider(c(annotated_genes,dist_to_TSS),names_sep="_") %>%
+	dplyr::rename("chr" = seqnames) %>%
+	dplyr::select(-width,-strand) %>%
+	inner_join(O786_sig_regions_tbl,by=c("chr","start","end")) %>%
+	inner_join(as.data.frame(O786_res) %>% as_tibble(),by=c("name" = "X786O_enhancerID")) %>%
+	dplyr::select(chr, 
+		start, 
+		end, 
+		name, 
+		baseMean = X786O_baseMean, 
+		log2FoldChange = X786O_log2FoldChange,
+		lfcSE = X786O_lfcSE,
+		stat = X786O_stat,
+		pvalue = X786O_pvalue,
+		padj = X786O_padj,
+		annotated_genes_1,
+		annotated_genes_2,
+		dist_to_TSS_1,
+		dist_to_TSS_2)
+
+write_tsv(O786_sig_merged,"786-O_dCas9_sig_withLinkedGenes.tsv")
+
+O786_sig_merged_genes <- O786_sig_merged %>%
+	dplyr::select(contains("annotated_genes")) %>%
+	unclass() %>% 
+	stack() %>%
+	pull(values) %>%
+	unique() %>%
+	.[!is.na(.)]
+```
+
+```{r,echo=F}
+Sys.sleep(60)
+```
+
+# Associate A498 to genes using rGREAT linkages to two closest hg19 genes
+In future could improve if updated version allows inclusion of 'name' field in input, see [here](https://github.com/jokergoo/rGREAT/issues/38).
+For now merging based on coordinates
+```{r}
+
+A498_sig_regions_tbl <- enframe(rownames(A498_rld.sig),name=NULL) %>% 
+    as_tibble() %>%
+    tidyr::extract(value,c("chr","start","end","name"),"(^.+)_(.+)_(.+)_(enh.+)",remove=F) %>%
+	dplyr::select(chr,start,end,value) %>%
+	dplyr::rename("name" = value) %>%
+	mutate(start = as.numeric(start), end = as.numeric(end))
+
+A498_GREATjob <- submitGreatJob(as.data.frame(A498_sig_regions_tbl),
+	species="hg19",
+	rule="twoClosest",
+	gr_is_zero_based=T)
+
+# Peek at gene associations
+getRegionGeneAssociations(A498_GREATjob)
+
+A498_sig_merged <- as.data.frame(getRegionGeneAssociations(A498_GREATjob)) %>% 
+	as_tibble() %>% 
+	unnest_wider(c(annotated_genes,dist_to_TSS),names_sep="_") %>%
+	dplyr::rename("chr" = seqnames) %>%
+	dplyr::select(-width,-strand) %>%
+	inner_join(A498_sig_regions_tbl,by=c("chr","start","end")) %>%
+	inner_join(as.data.frame(A498_res) %>% as_tibble(),by=c("name" = "A498_enhancerID")) %>%
+	dplyr::select(chr, 
+		start, 
+		end, 
+		name, 
+		baseMean = A498_baseMean, 
+		log2FoldChange = A498_log2FoldChange,
+		lfcSE = A498_lfcSE,
+		stat = A498_stat,
+		pvalue = A498_pvalue,
+		padj = A498_padj,
+		annotated_genes_1,
+		annotated_genes_2,
+		dist_to_TSS_1,
+		dist_to_TSS_2)
+
+write_tsv(A498_sig_merged,"A498_dCas9_sig_withLinkedGenes.tsv")
+
+A498_sig_merged_genes <- A498_sig_merged %>%
+	dplyr::select(contains("annotated_genes")) %>%
+	unclass() %>% 
+	stack() %>%
+	pull(values) %>%
+	unique() %>%
+	.[!is.na(.)]
+```
+
+
+# Count number of intersecting linked genes and plot Venn diagram
+```{r}
+length(intersect(O786_sig_merged_genes,A498_sig_merged_genes))
+
+vlist <- list("786-O" = O786_sig_merged_genes, "A498" = A498_sig_merged_genes)
+v <- Venn(vlist)
+plot(v)
+
+# Print list of genes
+overlapping_genes <- intersect(O786_sig_merged_genes,A498_sig_merged_genes)
+enframe(overlapping_genes,name=NULL) %>%
+	dplyr::arrange(value) %>%
+	print(n=100)
+
+```
+
+# Save workspace
+```{r}
+save.image("dCas9screen_assignToGenes.RData")
+```
+
+# Get session info
+```{r}
+sessionInfo()
+```
