@@ -1,0 +1,241 @@
+---
+title: "TCGA-KIRC association between gene expression and patient Overall Survival"
+author: "Jeremy M. Simon"
+date: "2/20/2023"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Load libraries
+```{r, message=FALSE, warning=FALSE}
+library(SummarizedExperiment)
+library(GenomicRanges)
+library(tidyverse)
+library(TCGAbiolinks)		# TCGAbiolinks_2.25.3
+library(survival)
+library(survminer)
+library(patchwork)
+```
+
+```{r,echo=F}
+setwd("/proj/jmsimon/Zhang/ccRCC_TCGA_GDC_dCas9screen")
+```
+
+
+# Load previously saved RNA, CNV, and mutation data from GDC
+```{r}
+load("TCGA_KIRC_GDC_021723.RData")
+```
+
+# Load previously saved Tumor vs Normal differential expression results
+```{r}
+load("TCGA_KIRC_GDC_021623_TumorNormal_DESeq2_demoCorrected_results.RData")
+```
+
+# Load previously saved data from gRNA gene linkages
+```{r}
+load("dCas9screen_assignToGenes.RData")
+```
+
+# Take list of overlapping genes from dCas9 gRNA screen, then intersect with TCGA Tumor vs Normal differential expression results
+```{r}
+overexpressed <- rownames(resdata.sig)
+
+overlapping_overexpressed <- overlapping_genes[overlapping_genes %in% overexpressed]
+length(overlapping_overexpressed)
+
+overlapping_overexpressed.IDs <- cbind("Gene" = rowData(rna.data)$gene_name,"ID" = rowData(rna.data)$gene_id) %>%
+	as_tibble() %>%
+	dplyr::filter(Gene %in% overlapping_overexpressed) %>%
+	pull(ID)
+```
+
+
+# Reformat VHL gene mutation data
+```{r}
+mut_data_tbl <- mut.data %>%
+    as_tibble() %>%
+    dplyr::filter(Hugo_Symbol=="VHL") %>%
+    dplyr::select(Hugo_Symbol,Variant_Classification,IMPACT,Tumor_Sample_Barcode,Matched_Norm_Sample_Barcode) %>%
+    dplyr::filter(IMPACT != "LOW") %>%
+    mutate(Tumor_Sample_Barcode = substr(Tumor_Sample_Barcode,1,12)) %>%
+    mutate(Matched_Norm_Sample_Barcode = substr(Matched_Norm_Sample_Barcode,1,12)) %>%
+    unique()
+```
+
+# Reformat CNV data
+There are some cases where there are multiple tumor specimens from the same patient, and these have discrepant CN calls. 
+Take the minimum Copy Number value for a given tumor ID
+```{r}
+CN_data_tbl <- enframe(assays(CN.data)$copy_number["ENSG00000134086.8",]) %>% 
+	as_tibble() %>%
+	separate(name,c("Tumor_Sample_Barcode","Matched_Norm_Sample_Barcode"),sep=",") %>%
+	dplyr::rename("VHL_CN" = value) %>%
+    mutate(Tumor_Sample_Barcode = substr(Tumor_Sample_Barcode,1,12)) %>%
+    mutate(Matched_Norm_Sample_Barcode = substr(Matched_Norm_Sample_Barcode,1,12)) %>%
+    unique() %>%
+    group_by(Tumor_Sample_Barcode) %>%
+    summarize(VHL_CN_min = min(VHL_CN))
+```
+
+
+# Prepare data to run survival analysis using survminer/ggsurvplot on just the overlapping and overexpressed genes derived above
+Using info [here](https://www.costalab.org/wp-content/uploads/2020/11/R_class_D3.html#6_Gene_expression_and_survival) as a guide for computing Overall Survival:
+
+```{r}
+# Take log2 of expression values
+exp_data <- log2(assays(rna.data)$fpkm_uq_unstrand + 1)
+
+# Subset clinical data to tumors only, and make table unique by sample ID
+# Include additional variables needed here to compute Overall Survival
+
+clinical_data_forCox <- colData(rna.data)
+clinical_data_forCox <- clinical_data_forCox[clinical_data_forCox$sample_type=="Primary Tumor",]
+clinical_data_forCox$bcr_patient_barcode <- substr(clinical_data_forCox$bcr_patient_barcode,1,12)
+rownames(clinical_data_forCox) <- NULL
+clinical_data_forCox <- as.data.frame(subset(clinical_data_forCox, select = c("bcr_patient_barcode", "days_to_death", "days_to_last_follow_up", "vital_status", "age_at_diagnosis", "gender")))
+clinical_data_forCox <- unique(clinical_data_forCox)
+
+clinical_data_forCox$deceased <- clinical_data_forCox$vital_status == "Dead"
+clinical_data_forCox$overall_survival <- ifelse(clinical_data_forCox$deceased,
+                                   clinical_data_forCox$days_to_death,
+                                   clinical_data_forCox$days_to_last_follow_up)
+
+head(clinical_data_forCox)
+```
+
+# Transpose expression matrix
+```{r}
+exp_data_t <- exp_data
+colnames(exp_data_t) <- substr(colnames(exp_data_t),1,12)
+exp_data_t <- t(exp_data_t)
+exp_data_t[1:5,1:5]
+```
+
+# Combine clinical metadata with expression data for these genes
+```{r}
+clinical_withExp <- cbind(clinical_data_forCox, exp_data_t[clinical_data_forCox$bcr_patient_barcode, overlapping_overexpressed.IDs])
+clinical_withExp_tbl <- clinical_withExp %>%
+	as_tibble()
+
+clinical_withExp_tbl
+```
+
+# Combine with Copy Number and Mutation status of VHL for use later
+```{r}
+clinical_withExp_withVHL <- as.data.frame(left_join(clinical_withExp_tbl, mut_data_tbl, by=c("bcr_patient_barcode" = "Tumor_Sample_Barcode")) %>%
+	left_join(CN_data_tbl, by=c("bcr_patient_barcode" = "Tumor_Sample_Barcode")) %>%
+	dplyr::select(-Matched_Norm_Sample_Barcode) %>%
+	mutate(VHLmutation = case_when(
+			!is.na(Variant_Classification) ~ Variant_Classification,
+			T ~ "WT"
+		)
+	) %>%
+	dplyr::select(-Hugo_Symbol,-Variant_Classification,-IMPACT)
+)
+```
+
+# Run survival analysis
+For each gene, subset matrix to clinical data and expression of just this one gene
+
+* Then compute quartiles of expression
+* Then run KM of high vs low expression
+* Fit cox regression model
+* Plot KM curve for each but save as a list that we will print as one PDF later
+
+```{r}
+km_pvals <- c()
+HR <- c()
+CoxP <- c()
+plot_list = list()
+
+for (i in colnames(clinical_withExp_withVHL)[str_detect(colnames(clinical_withExp_withVHL),"ENSG")]) {
+	temp <- clinical_withExp_withVHL[,c(which(str_detect(colnames(clinical_withExp_withVHL),"ENSG",negate = T)),which(colnames(clinical_withExp_withVHL)==i))]
+
+	# Compute quartiles of expression and subset matrix to just high or low
+	quantiles <- ntile(temp[,ncol(temp)],4)
+	temp[,which(colnames(temp)==i)] <- quantiles
+	temp[,which(colnames(temp)==i)] <- ifelse(temp[,which(colnames(temp)==i)] == 4, "HIGH", ifelse(temp[,which(colnames(temp)==i)] == 1, "LOW", "NA"))
+	temp <- temp[which(!str_detect(temp[,which(colnames(temp)==i)],"NA")),]
+
+	# Reorder quantiles as factors so that the Cox test is high relative to low
+	temp[,which(colnames(temp)==i)] = relevel(as.factor(temp[,which(colnames(temp)==i)]), ref = "LOW")
+	
+	# Perform Kaplan-Meier survival analysis on expression high/low quartiles
+	formula <- as.formula(paste("Surv(overall_survival, deceased)", i, sep = " ~ "))	
+	fit <- do.call(survfit, args = list(formula = formula, data = temp))
+	pval <- surv_pvalue(fit, data = temp, method = "survdiff")$pval
+	km_pvals[i] <- pval
+	gene_name <- rowData(rna.data)[i,"gene_name"]
+	p <- ggsurvplot(fit, 
+		data = temp, 
+		pval = F, 
+		risk.table = T, 
+		title = gene_name, 
+		palette = c(4,2),
+		legend = "right",
+		legend.labs = levels(temp[,which(colnames(temp)==i)]),
+		legend.title = "Expression quartile",
+		conf.int = T
+	)
+	plot_list[[i]] <- p
+	
+	# Fit Cox proportional hazards regression model on expression high/low quartiles
+	cox <- coxph(formula = formula, data = temp)
+	cox_summary <- summary(cox)
+	HR[i] <- as.numeric(cox_summary$coefficients[2])
+	CoxP[i] <- as.numeric(cox_summary$logtest[3])
+}
+
+km_fdr <- p.adjust(km_pvals,method="BH")
+cox_fdr <- p.adjust(CoxP,method="BH")
+gene_names <- rowData(rna.data)[names(km_pvals),"gene_name"]
+survival_result <- as.data.frame(cbind("KM_pvals" = as.numeric(km_pvals), "KM_fdr" = as.numeric(km_fdr), "Cox_P" = as.numeric(CoxP), "Cox_fdr" = as.numeric(cox_fdr), "Cox_HR" = as.numeric(HR)))
+rownames(survival_result) <- gene_names
+survival_result <- survival_result[order(as.numeric(survival_result$KM_fdr)),]
+write.table(survival_result,"TCGA_KIRC_GDC_survival_survminer_results_022023.txt",quote=F,sep="\t",col.names=NA)
+```
+
+# Write pdf of all K-M plots
+```{r}
+pdf("TCGA_KIRC_GDC_survival_survminer_results_022023.pdf")
+for (i in overlapping_overexpressed.IDs) {
+    gene <- rowData(rna.data)[i,"gene_name"]
+    km_fdr <- format.pval(survival_result[gene,"KM_fdr"])
+    cox_fdr <- format.pval(survival_result[gene,"Cox_fdr"])
+    cox_hr <- round(survival_result[gene,"Cox_HR"],3)
+    a <- plot_list[[i]]$plot + 
+	annotate("text",  x=0, y = 0.25, hjust = 0, label = paste0("KM FDR = ",km_fdr)) +
+	annotate("text",  x=0, y = 0.15, hjust = 0, label = paste0("Cox FDR = ",cox_fdr)) +
+	annotate("text",  x=0, y = 0.05, hjust = 0, label = paste0("Cox HR = ",cox_hr))
+    b <- plot_list[[i]]$table
+    print(a / b + plot_layout(heights = c(4, 1)))
+}
+dev.off()
+```
+
+# Show first plot here as an example
+```{r}
+i <- "ENSG00000168487.20"
+gene <- rowData(rna.data)[i,"gene_name"]
+km_fdr <- format.pval(survival_result[gene,"KM_fdr"])
+cox_fdr <- format.pval(survival_result[gene,"Cox_fdr"])
+cox_hr <- round(survival_result[gene,"Cox_HR"],3)
+a <- plot_list[[i]]$plot + 
+	annotate("text",  x=0, y = 0.25, hjust = 0, label = paste0("KM FDR = ",km_fdr)) +
+	annotate("text",  x=0, y = 0.15, hjust = 0, label = paste0("Cox FDR = ",cox_fdr)) +
+	annotate("text",  x=0, y = 0.05, hjust = 0, label = paste0("Cox HR = ",cox_hr))
+b <- plot_list[[i]]$table
+print(a / b + plot_layout(heights = c(4, 1)))
+```
+
+# Save workspace
+```{r}
+save.image("TCGA_KIRC_GDC_survival_results.RData")
+```
+
+# Get session info
+```{r}
+sessionInfo()
+```
