@@ -1,0 +1,263 @@
+---
+title: "Assembly of final summary figure"
+author: "Jeremy M. Simon"
+date: "2/20/2023"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Load libraries
+```{r, message=FALSE, warning=FALSE}
+library(SummarizedExperiment)
+library(GenomicRanges)
+library(tidyverse)
+library(TCGAbiolinks)		# TCGAbiolinks_2.25.3
+library(survival)
+library(survminer)
+library(ComplexHeatmap)
+library(circlize)
+library(paletteer)
+library(patchwork)
+library(gridExtra)
+```
+
+```{r,echo=F}
+setwd("/proj/jmsimon/Zhang/ccRCC_TCGA_GDC_dCas9screen")
+```
+
+
+# Load previously saved RNA, CNV, and mutation data from GDC, survival results, and dCas9 screen heatmaps
+```{r}
+load("TCGA_KIRC_GDC_survival_results.RData")
+```
+
+# Plot heatmap of expression and add survival info as color-coded heatmap annotations
+Use VST values from DESeq2 here
+
+```{r}
+data.mat <- rownames_to_column(as.data.frame(resdata.sig),var="Gene") %>%
+	as_tibble() %>%
+	dplyr::filter(Gene %in% overlapping_overexpressed) %>%
+	dplyr::select(-baseMean,-log2FoldChange,-lfcSE,-pvalue,-padj) %>%
+	as.data.frame() %>%
+	column_to_rownames(var="Gene")
+
+
+cnames <- colnames(data.mat)
+sampleType <- str_replace_all(cnames,".+_","")
+
+medianCtr<-function(x){
+	annAll <- dimnames(x)
+	medians <- apply(x,1,median,na.rm=T)
+	x <- t(scale(t(x),center=medians,scale=F))
+	dimnames(x) <- annAll
+	return(x)
+}
+
+data.mat.ctr <- medianCtr(data.mat)
+```
+
+# Format VHL, copy number, and survival data
+We will consider a gene a "hit" if it satisfies the following criteria
+
+* Is overexpressed in tumors relative to normal kidney
+* K-M FDR < 0.05
+* Cox FDR < 0.05
+* Cox Hazard Ratio (HR) > 1
+	+ indicating higher survival is associated with worse survival
+
+```{r}
+vhl_status <- clinical_withExp_withVHL %>%
+	as_tibble() %>%
+	dplyr::select(bcr_patient_barcode, VHL_CN_min, VHLmutation) %>%
+	mutate(VHLmutation = as.factor(VHLmutation))
+
+vhl_status_copynum <- enframe(cnames) %>%
+	as_tibble() %>%
+	mutate(bcr_patient_barcode = case_when(
+			str_detect(value,"PrimaryTumor") ~ substr(value,1,12),
+			T ~ value
+		)
+	) %>%
+	left_join(vhl_status,by="bcr_patient_barcode") %>%
+	pull(VHL_CN_min)
+
+vhl_status_mut <- enframe(cnames) %>%
+	as_tibble() %>%
+	mutate(bcr_patient_barcode = case_when(
+			str_detect(value,"PrimaryTumor") ~ substr(value,1,12),
+			T ~ value
+		)
+	) %>%
+	left_join(vhl_status,by="bcr_patient_barcode") %>%
+	pull(VHLmutation)
+		
+survival_result_hits <- rownames_to_column(survival_result,var="Gene") %>%
+	as_tibble() %>%
+	mutate(hit = as.factor(case_when(
+			as.numeric(KM_fdr) < 0.05 & as.numeric(Cox_fdr) < 0.05 & as.numeric(Cox_HR) > 1 ~ "Hit",
+			T ~ "not"
+		))
+	) %>%
+	column_to_rownames(var="Gene") %>%
+	as.data.frame()
+```
+
+
+
+
+
+# Plot heatmap illustrating tumor and normal kidney gene expression, survival associations, and VHL mutation and copy-number status for the common genes
+```{r,fig.width=10,fig.height=10}
+ha1 <- HeatmapAnnotation(SampleType = factor(sampleType,levels = c("SolidTissueNormal","PrimaryTumor")), 
+			col = list(SampleType = c("SolidTissueNormal" = "purple", "PrimaryTumor" = "dark green")),
+			border=T)
+
+ha2 <- HeatmapAnnotation(VHL_CN = as.factor(vhl_status_copynum), 
+			col = list(VHL_CN = c("0" = "black", "1" = "gray20", "2" = "white", "3" = "gray90", "4" = "gray70")),
+			border=T,
+			na_col = "white")
+
+ha3 <- HeatmapAnnotation(VHL_mut = as.factor(vhl_status_mut), 
+			col = list(VHL_mut = c("WT" = "white", 
+						"Frame_Shift_Del" = paletteer_d(`"colorblindr::OkabeIto"`)[6], 
+						"Frame_Shift_Ins" = paletteer_d(`"colorblindr::OkabeIto"`)[1], 
+						"In_Frame_Del" = paletteer_d(`"colorblindr::OkabeIto"`)[4], 
+						"Missense_Mutation" = paletteer_d(`"colorblindr::OkabeIto"`)[7], 
+						"Nonsense_Mutation" = paletteer_d(`"colorblindr::OkabeIto"`)[5], 
+						"Nonstop_Mutation" = paletteer_d(`"colorblindr::OkabeIto"`)[2], 
+						"Splice_Site" = paletteer_d(`"colorblindr::OkabeIto"`)[8])),
+			border=T,
+			na_col = "white")
+
+ha4 <- rowAnnotation(KM_FDR = survival_result[rownames(data.mat.ctr),"KM_fdr"], 
+			col = list(KM_FDR = circlize::colorRamp2(c(0,0.05,1),c("black","white","white"))),
+			border=T)
+
+ha5 <- rowAnnotation(Cox_FDR = survival_result[rownames(data.mat.ctr),"Cox_fdr"], 
+			col = list(Cox_FDR = circlize::colorRamp2(c(0,0.05,1),c("black","white","white"))),
+			border=T)
+
+ha6 <- rowAnnotation(Cox_HR = survival_result[rownames(data.mat.ctr),"Cox_HR"], 
+			col = list(Cox_HR = circlize::colorRamp2(c(0,1,2),c("blue","blue","red"))),
+			border=T)
+
+plot3 <- ComplexHeatmap::Heatmap(data.mat.ctr,
+	show_row_names=T,
+	show_column_names=F,
+	row_title=NULL,
+	column_title=NULL,
+	name = "Median-centered\nExpression",
+	column_split = factor(sampleType,levels = c("SolidTissueNormal","PrimaryTumor")),
+	row_split = survival_result_hits[rownames(data.mat.ctr),"hit"],
+	col = circlize::colorRamp2(c(-3, 0, 3), c("blue","white","red")),
+	cluster_column_slices = F,
+	cluster_row_slices = F,
+	border=T, 
+	top_annotation = c(ha1,ha2,ha3),
+	right_annotation = c(ha4,ha5,ha6)
+)
+
+# Draw heatmap
+draw(plot3)
+
+# Grab resulting heatmap for full figure assembly
+plot3.grob <- grid.grabExpr(draw(plot3)) 
+```
+
+
+# Assemble final figure
+```{r,fig.width=17,fig.height=10}
+
+# Hack into the plot internals to hide the legends of each plot, construct our own in a different orientation
+plot1@heatmap_param$show_heatmap_legend <- FALSE
+plot1@top_annotation@anno_list$Condition@show_legend <- FALSE
+
+plot2@heatmap_param$show_heatmap_legend <- FALSE
+plot2@top_annotation@anno_list$Condition@show_legend <- FALSE
+
+initial.col <- as.character(plot1@top_annotation@anno_list$Condition@color_mapping@colors["Initial"])
+omc.col <- as.character(plot1@top_annotation@anno_list$Condition@color_mapping@colors["OneMonthCulture"])
+colorbar.col.vals <- plot1@matrix_color_mapping@levels
+colorbar.col.cols <- plot1@matrix_color_mapping@colors
+
+grob1 <- grid.grabExpr(draw(plot1)) 
+grob2 <- grid.grabExpr(draw(plot2)) 
+
+lgd1 <- Legend(labels = c("Initial","One month culture"), 
+	legend_gp = gpar(fill = c(initial.col,omc.col)), 
+	title = "Condition")
+
+lgd2 <- Legend(col_fun = circlize::colorRamp2(colorbar.col.vals, colorbar.col.cols), 
+	title = "Median-centered\nnormalized abundance",
+	direction = "horizontal", 
+	border = T, 
+	at = c(min(colorbar.col.vals), colorbar.col.vals[ceiling(length(colorbar.col.vals)/2)], max(colorbar.col.vals)), 
+	legend_width = unit(4, "cm"))
+	
+pd <- packLegend(lgd1, lgd2, direction = "horizontal")
+grob3 <- grid.grabExpr(draw(pd)) 
+
+# Assemble a table showing the number of gRNA and gene hits at each step
+a498.grna <- length(A498_sig_merged$name)
+O786.grna <- length(O786_sig_merged$name)
+
+tab1 <- data.frame("gRNAs" = c(a498.grna,O786.grna,"",""), 
+			"Genes" = c(length(A498_sig_merged_genes),length(O786_sig_merged_genes),length(overlapping_genes),length(overlapping_overexpressed)))
+
+rownames(tab1) <- c("A498","786O","Overlap","Overlap +\noverexpressed")
+
+tab1
+
+tab1.grob <- gridExtra::tableGrob(tab1,
+	theme = ttheme_default(base_size = 10,
+	core = list(fg_params=list(fontface=c(rep("plain", 3), "bold")),
+				bg_params = list(fill=c(rep(c("grey95", "grey90"),
+                                    length.out=3), "#6BAED6"))
+				)
+			)
+		)
+
+
+# Final plot		
+patchwork::wrap_plots(list(A=grob1,B=grob2,C=grob3,D=plot3.grob,E=tab1.grob), 
+	design = "#####DDDDDD
+			  AA###DDDDDD
+			  AA###DDDDDD
+			  AAEEEDDDDDD
+              BBEEEDDDDDD
+              BB###DDDDDD
+              BB###DDDDDD
+              CC###DDDDDD"
+)
+```
+
+
+
+
+```{r,echo=F}
+pdf("TCGA_KIRC_GDC_survival_survminer_heatmap_combined_dCas9screen.pdf",width=17,height=8)
+patchwork::wrap_plots(list(A=grob1,B=grob2,C=grob3,D=plot3.grob,E=tab1.grob), 
+	design = "#####DDDDDD
+			  AA###DDDDDD
+			  AA###DDDDDD
+			  AAEEEDDDDDD
+              BBEEEDDDDDD
+              BB###DDDDDD
+              BB###DDDDDD
+              CC###DDDDDD"
+)
+
+dev.off()
+```
+
+# Save workspace
+```{r}
+save.image("TCGA_KIRC_GDC_plotAssembly.RData")
+```
+
+# Get session info
+```{r}
+sessionInfo()
+```
