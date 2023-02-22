@@ -1,4 +1,4 @@
-Contents of this repository
+Contents of this repository, listed in the order they were executed
 
 * `TCGA-KIRC_GDC_dataDownload.html` and `TCGA-KIRC_GDC_dataDownload.Rmd`
   + RMarkdown of TCGA-KIRC gene expression, gene mutation status, and gene-level copy number status data retrieval from GDC via [`TCGAbiolinks`](http://bioconductor.org/packages/release/bioc/html/TCGAbiolinks.html)
